@@ -227,7 +227,6 @@ class DFlashEngine(BaseEngine):
                 max_new_tokens=max_tokens,
                 stop_token_ids=stop_ids,
                 prompt_tokens_override=prompt_tokens,
-                temperature=temperature,
             ):
                 event_type = event.get("event")
 
