@@ -783,9 +783,6 @@ class VLMBatchedEngine(BaseEngine):
             - image_cache_key_ranges: Per-image-turn cache key boundaries with
               cumulative image hashes
         """
-        from mlx_vlm.prompt_utils import apply_chat_template
-        from mlx_vlm.utils import prepare_inputs
-
         num_images = len(images)
         model_type = self.model_type or ""
 
@@ -795,6 +792,23 @@ class VLMBatchedEngine(BaseEngine):
                 f"Model {model_type} does not support multi-image chat. "
                 f"Please use only 1 image."
             )
+
+        # Text-only fast path: use self._tokenizer for chat template and
+        # tokenization.  The VLM processor's apply_chat_template may use a
+        # different template that does not properly handle tools, causing tool
+        # calling to silently break (issue #812).  self._tokenizer (a deep
+        # copy of the processor's inner tokenizer) carries the original
+        # chat template which handles tools correctly — matching the behaviour
+        # of BatchedEngine for text-only requests.
+        if num_images == 0:
+            return self._prepare_text_only_inputs(
+                messages,
+                chat_template_kwargs=chat_template_kwargs,
+                tools=tools,
+            )
+
+        from mlx_vlm.prompt_utils import apply_chat_template
+        from mlx_vlm.utils import prepare_inputs
 
         # Apply VLM-specific chat template with image placeholders.
         # Build per-message placeholders in oMLX so image-bearing turns always
@@ -1110,6 +1124,34 @@ class VLMBatchedEngine(BaseEngine):
         else:
             prompt = "\n".join(f"{m['role']}: {m['content']}" for m in messages)
             return prompt + "\nassistant:"
+
+    def _prepare_text_only_inputs(
+        self,
+        messages: list[dict[str, Any]],
+        chat_template_kwargs: dict[str, Any] | None = None,
+        tools: list[dict] | None = None,
+    ) -> Tuple[
+        List[int],
+        Optional[mx.array],
+        Optional[Dict[str, Any]],
+        Optional[str],
+        int,
+        List[Tuple[int, str]],
+    ]:
+        """Prepare inputs for text-only requests using the tokenizer path.
+
+        Uses self._tokenizer for chat template application and tokenization,
+        which properly handles tool definitions (issue #812).  This matches
+        BatchedEngine's text-only path and avoids the VLM processor pipeline
+        which may use a different chat template that silently drops tools.
+
+        Returns the same 6-tuple as _prepare_vision_inputs with no vision data.
+        """
+        prompt = self._apply_chat_template(
+            messages, tools, chat_template_kwargs=chat_template_kwargs
+        )
+        token_ids = self._tokenizer.encode(prompt)
+        return token_ids, None, None, None, 0, []
 
     async def generate(
         self,
