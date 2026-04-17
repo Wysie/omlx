@@ -434,13 +434,13 @@ class TestProcessChatMessages:
     """Tests for VLMBatchedEngine._process_chat_messages()."""
 
     @patch("omlx.engine.vlm.extract_images_from_messages")
-    def test_text_only_uses_vlm_prepare_path(self, mock_extract):
-        """Text-only turns on a VLM model still use _prepare_vision_inputs()."""
+    def test_text_only_uses_tokenizer_path(self, mock_extract):
+        """Text-only turns on a VLM model use _prepare_text_only_inputs()."""
         text_msgs = [{"role": "user", "content": "Hello"}]
         mock_extract.return_value = (text_msgs, [])
 
         engine = _make_loaded_engine()
-        engine._prepare_vision_inputs = MagicMock(
+        engine._prepare_text_only_inputs = MagicMock(
             return_value=([1, 2, 3], None, None, None, 0, [])
         )
 
@@ -454,21 +454,20 @@ class TestProcessChatMessages:
         assert image_hash is None
         assert image_cache_key_start == 0
         assert image_cache_key_ranges == []
-        engine._prepare_vision_inputs.assert_called_once_with(
+        engine._prepare_text_only_inputs.assert_called_once_with(
             text_msgs,
-            [],
             chat_template_kwargs=None,
             tools=None,
         )
 
     @patch("omlx.engine.vlm.extract_images_from_messages")
-    def test_text_only_passes_tools_to_prepare_vision(self, mock_extract):
-        """Text-only + tools still convert and pass tools through VLM path."""
+    def test_text_only_passes_tools_to_tokenizer_path(self, mock_extract):
+        """Text-only + tools convert and pass tools through tokenizer path."""
         text_msgs = [{"role": "user", "content": "Hello"}]
         mock_extract.return_value = (text_msgs, [])
 
         engine = _make_loaded_engine()
-        engine._prepare_vision_inputs = MagicMock(
+        engine._prepare_text_only_inputs = MagicMock(
             return_value=([1, 2, 3], None, None, None, 0, [])
         )
 
@@ -480,7 +479,7 @@ class TestProcessChatMessages:
             engine._process_chat_messages(messages, tools=tools, kwargs={})
 
         mock_convert.assert_called_once_with(tools)
-        call_kwargs = engine._prepare_vision_inputs.call_args[1]
+        call_kwargs = engine._prepare_text_only_inputs.call_args[1]
         assert call_kwargs["tools"] == [{"converted": True}]
 
     @patch("omlx.engine.vlm.extract_images_from_messages")
@@ -564,6 +563,63 @@ class TestProcessChatMessages:
 # ---------------------------------------------------------------------------
 # TestPrepareVisionInputs
 # ---------------------------------------------------------------------------
+
+class TestPrepareTextOnlyInputs:
+    """Tests for VLMBatchedEngine._prepare_text_only_inputs()."""
+
+    def test_uses_tokenizer_apply_chat_template(self):
+        """_prepare_text_only_inputs uses self._tokenizer (not processor)."""
+        tokenizer = MagicMock()
+        tokenizer.apply_chat_template.return_value = "<|im_start|>user\nHello<|im_end|><|im_start|>assistant\n"
+        tokenizer.encode.return_value = [1, 2, 3, 4, 5]
+
+        engine = _make_loaded_engine(tokenizer=tokenizer)
+
+        messages = [{"role": "user", "content": "Hello"}]
+        result = engine._prepare_text_only_inputs(messages)
+
+        token_ids, embeds, kwargs, img_hash, cache_start, cache_ranges = result
+        assert token_ids == [1, 2, 3, 4, 5]
+        assert embeds is None
+        assert kwargs is None
+        assert img_hash is None
+        assert cache_start == 0
+        assert cache_ranges == []
+        tokenizer.apply_chat_template.assert_called_once()
+
+    def test_passes_tools_to_chat_template(self):
+        """Tools are forwarded to _apply_chat_template for proper rendering."""
+        tokenizer = MagicMock()
+        tokenizer.apply_chat_template.return_value = "<prompt with tools>"
+        tokenizer.encode.return_value = [10, 20]
+
+        engine = _make_loaded_engine(tokenizer=tokenizer)
+
+        messages = [{"role": "user", "content": "Search for X"}]
+        tools = [{"type": "function", "function": {"name": "search"}}]
+
+        result = engine._prepare_text_only_inputs(messages, tools=tools)
+
+        token_ids, embeds, kwargs, img_hash, cache_start, cache_ranges = result
+        assert token_ids == [10, 20]
+        # Verify tools were passed to apply_chat_template
+        call_kwargs = tokenizer.apply_chat_template.call_args[1]
+        assert call_kwargs.get("tools") == tools
+
+    def test_no_tools_not_in_kwargs(self):
+        """When tools=None, 'tools' key should not appear in template kwargs."""
+        tokenizer = MagicMock()
+        tokenizer.apply_chat_template.return_value = "<prompt>"
+        tokenizer.encode.return_value = [1]
+
+        engine = _make_loaded_engine(tokenizer=tokenizer)
+
+        messages = [{"role": "user", "content": "Hello"}]
+        engine._prepare_text_only_inputs(messages, tools=None)
+
+        call_kwargs = tokenizer.apply_chat_template.call_args[1]
+        assert "tools" not in call_kwargs
+
 
 class TestPrepareVisionInputs:
     """Tests for VLMBatchedEngine._prepare_vision_inputs()."""
